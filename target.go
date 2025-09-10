@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -104,9 +105,21 @@ func (t *target) addOrUpdateMonitor(monitor *mon.Monitor, opts targetOpts, cfg *
 		network = "ip4"
 	}
 
-	addrs, err := t.resolver.LookupNetIP(ctx, network, t.host)
+	ip, err := netip.ParseAddr(t.host) // just to validate the address
+
+	var addrs []netip.Addr
 	if err != nil {
-		return fmt.Errorf("error resolving target '%s': %w", t.host, err)
+		var err error
+		addrs, err = t.resolver.LookupNetIP(ctx, network, t.host)
+		if err != nil {
+			return fmt.Errorf("error resolving target '%s': %w", t.host, err)
+		}
+	} else {
+		if ip.Is4() && !opts.disableIPv4 {
+			addrs = append(addrs, ip)
+		} else if ip.Is6() && !opts.disableIPv6 {
+			addrs = append(addrs, ip)
+		}
 	}
 
 	var sanitizedAddrs []net.IPAddr
