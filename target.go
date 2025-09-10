@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/czerwonk/ping_exporter/config"
 	mon "github.com/digineo/go-ping/monitor"
 	log "github.com/sirupsen/logrus"
@@ -22,7 +23,7 @@ type target struct {
 	host      string
 	addresses []net.IPAddr
 	delay     time.Duration
-	resolver  *net.Resolver
+	resolver  upstream.Resolver
 	mutex     sync.Mutex
 }
 
@@ -95,22 +96,22 @@ func (t *target) addOrUpdateMonitor(monitor *mon.Monitor, opts targetOpts, cfg *
 		ctx, cancel = context.WithTimeout(context.Background(), cfg.DNS.Timeout.Duration())
 		defer cancel()
 	}
-	addrs, err := t.resolver.LookupIPAddr(ctx, t.host)
+
+	network := "ip"
+	if opts.disableIPv4 && !opts.disableIPv6 {
+		network = "ip6"
+	} else if !opts.disableIPv4 && opts.disableIPv6 {
+		network = "ip4"
+	}
+
+	addrs, err := t.resolver.LookupNetIP(ctx, network, t.host)
 	if err != nil {
 		return fmt.Errorf("error resolving target '%s': %w", t.host, err)
 	}
 
 	var sanitizedAddrs []net.IPAddr
 	for _, addr := range addrs {
-		if getIPVersion(addr) == ipv6 && opts.disableIPv6 {
-			log.Infof("IPv6 disabled: skipping target for host %s (%v)", t.host, addr)
-			continue
-		}
-		if getIPVersion(addr) == ipv4 && opts.disableIPv4 {
-			log.Infof("IPv4 disabled: skipping target for host %s (%v)", t.host, addr)
-			continue
-		}
-		sanitizedAddrs = append(sanitizedAddrs, addr)
+		sanitizedAddrs = append(sanitizedAddrs, net.IPAddr{IP: addr.AsSlice()})
 	}
 
 	for _, addr := range sanitizedAddrs {

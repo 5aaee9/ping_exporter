@@ -3,17 +3,17 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/AdguardTeam/dnsproxy/upstream"
+	"github.com/AdguardTeam/golibs/netutil/sysresolv"
 	"github.com/digineo/go-ping"
 	mon "github.com/digineo/go-ping/monitor"
 
@@ -46,6 +46,7 @@ var (
 	historySize             = kingpin.Flag("ping.history-size", "Number of results to remember per target").Default("10").Int()
 	dnsRefresh              = kingpin.Flag("dns.refresh", "Interval for refreshing DNS records and updating targets accordingly (0 if disabled)").Default("1m").Duration()
 	dnsNameServer           = kingpin.Flag("dns.nameserver", "DNS server used to resolve hostname of targets").Default("").String()
+	dnsBootstrap            = kingpin.Flag("dns.bootstrap", "Bootstrap DNS server used to resolve the address of the DNS server").Default("").String()
 	dnsLookupTimeout        = kingpin.Flag("dns.timeout", "Timeout for DNS resolution").Default("0s").Duration()
 	disableIPv6             = kingpin.Flag("options.disable-ipv6", "Disable DNS from resolving IPv6 AAAA records").Default().Bool()
 	disableIPv4             = kingpin.Flag("options.disable-ipv4", "Disable DNS from resolving IPv4 A records").Default().Bool()
@@ -135,7 +136,7 @@ func printVersion() {
 	fmt.Println("Metric exporter for go-icmp")
 }
 
-func startMonitor(cfg *config.Config, resolver *net.Resolver) (*mon.Monitor, error) {
+func startMonitor(cfg *config.Config, resolver upstream.Resolver) (*mon.Monitor, error) {
 	var bind4, bind6 string
 	if ln, err := net.Listen("tcp4", "127.0.0.1:0"); err == nil {
 		// ipv4 enabled
@@ -177,7 +178,7 @@ func startMonitor(cfg *config.Config, resolver *net.Resolver) (*mon.Monitor, err
 	return monitor, nil
 }
 
-func upsertTargets(globalTargets *targets, resolver *net.Resolver, cfg *config.Config, monitor *mon.Monitor) error {
+func upsertTargets(globalTargets *targets, resolver upstream.Resolver, cfg *config.Config, monitor *mon.Monitor) error {
 	oldTargets := globalTargets.Targets()
 	newTargets := make([]*target, len(cfg.Targets))
 	var wg sync.WaitGroup
@@ -217,7 +218,7 @@ func upsertTargets(globalTargets *targets, resolver *net.Resolver, cfg *config.C
 	return nil
 }
 
-func watchConfig(globalTargets *targets, resolver *net.Resolver, monitor *mon.Monitor, collector *pingCollector) {
+func watchConfig(globalTargets *targets, resolver upstream.Resolver, monitor *mon.Monitor, collector *pingCollector) {
 	watcher, err := inotify.NewWatcher()
 	if err != nil {
 		log.Fatalf("unable to create file watcher: %v", err)
@@ -418,20 +419,44 @@ func loadConfig() (*config.Config, error) {
 	return cfg, err
 }
 
-func setupResolver(cfg *config.Config) *net.Resolver {
+func setupResolver(cfg *config.Config) upstream.Resolver {
+	var server string = cfg.DNS.Nameserver
 	if cfg.DNS.Nameserver == "" {
+		sysr, err := sysresolv.NewSystemResolvers(nil, 53)
+		if err != nil {
+			log.Printf("Cannot get system resolvers: %v", err)
+			os.Exit(1)
+		}
+
+		server = sysr.Addrs()[0].String()
+	}
+
+	var bootstrap upstream.Resolver = nil
+
+	if cfg.DNS.Bootstrap == "" {
+		bootstrap = net.DefaultResolver
+	} else {
+		bs, err := upstream.AddressToUpstream(cfg.DNS.Bootstrap, nil)
+		if err != nil {
+			log.Printf("Cannot parse bootstrap address %q: %v", cfg.DNS.Bootstrap, err)
+			bootstrap = net.DefaultResolver
+		} else {
+			bs = &upstream.UpstreamResolver{Upstream: bs}
+		}
+	}
+
+	options := upstream.Options{
+		Timeout:   cfg.DNS.Timeout.Duration(),
+		Bootstrap: bootstrap,
+	}
+
+	resolver, err := upstream.AddressToUpstream(server, &options)
+	if err != nil {
+		log.Printf("Cannot parse nameserver address %q: %v", server, err)
 		return net.DefaultResolver
 	}
 
-	if !strings.HasSuffix(cfg.DNS.Nameserver, ":53") {
-		cfg.DNS.Nameserver += ":53"
-	}
-	dialer := func(ctx context.Context, _, _ string) (net.Conn, error) {
-		d := net.Dialer{}
-		return d.DialContext(ctx, "udp", cfg.DNS.Nameserver)
-	}
-
-	return &net.Resolver{PreferGo: true, Dial: dialer}
+	return &upstream.UpstreamResolver{Upstream: resolver}
 }
 
 // addFlagToConfig updates cfg with command line flag values, unless the
@@ -465,6 +490,9 @@ func addFlagToConfig(cfg *config.Config) {
 	}
 	if cfg.DNS.Nameserver == "" {
 		cfg.DNS.Nameserver = *dnsNameServer
+	}
+	if cfg.DNS.Bootstrap == "" {
+		cfg.DNS.Bootstrap = *dnsBootstrap
 	}
 	if !cfg.Options.DisableIPv6 {
 		cfg.Options.DisableIPv6 = *disableIPv6

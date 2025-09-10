@@ -24,6 +24,7 @@ type Config struct {
 	DNS struct {
 		Refresh    duration `yaml:"refresh"`
 		Nameserver string   `yaml:"nameserver"`
+		Bootstrap  string   `yaml:"bootstrap"`
 		Timeout    duration `yaml:"timeout"`
 	} `yaml:"dns"`
 
